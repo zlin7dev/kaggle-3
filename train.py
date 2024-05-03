@@ -1,33 +1,31 @@
+import argparse
+import gc
+import importlib
+import os
+import sys
+from collections import defaultdict
+from copy import copy
+
+import ipdb
 import numpy as np
 import pandas as pd
-import importlib
-import sys
-from tqdm import tqdm
-import gc
-import argparse
 import torch
 from torch.cuda.amp import GradScaler, autocast
 from torch.nn.parallel import DistributedDataParallel as NativeDDP
-from collections import defaultdict
+from tqdm import tqdm
 
 from utils import (
-    set_seed,
-    get_model,
+    calc_grad_norm,
     create_checkpoint,
     get_data,
-    get_dataset,
     get_dataloader,
-    calc_grad_norm,
-)
-from utils import (
+    get_dataset,
+    get_model,
     get_optimizer,
     get_scheduler,
+    set_seed,
     setup_neptune,
 )
-
-
-from copy import copy
-import os
 
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
@@ -72,9 +70,9 @@ def run_eval(model, val_dataloader, cfg, pre="val", curr_epoch=0):
         if (cfg.local_rank == 0) and (cfg.calc_metric) and (((curr_epoch + 1) % cfg.calc_metric_epochs) == 0):
             # per batch calculations
             pass
-        
+
         if (not saved_images) & (cfg.save_first_batch_preds):
-            save_first_batch_preds(batch, output, cfg)
+            cfg.save_first_batch_preds(batch, output, cfg)
             saved_images = True
 
         for key, val in output.items():
@@ -84,7 +82,7 @@ def run_eval(model, val_dataloader, cfg, pre="val", curr_epoch=0):
         value = val_data[key]
         if isinstance(value[0], list):
             val_data[key] = [item for sublist in value for item in sublist]
-        
+
         else:
             if len(value[0].shape) == 0:
                 val_data[key] = torch.stack(value)
@@ -116,12 +114,12 @@ def run_eval(model, val_dataloader, cfg, pre="val", curr_epoch=0):
         val_score = cfg.calc_metric(cfg, pp_out, val_df, pre)
         if type(val_score)!=dict:
             val_score = {f'score':val_score}
-            
+
         for k, v in val_score.items():
             print(f"{pre}_{k}: {v:.3f}")
             if cfg.neptune_run:
                 cfg.neptune_run[f"{pre}/{k}"].log(v, step=cfg.curr_step)
-        
+
 
 #     print("EVAL FINISHED")
 
@@ -147,13 +145,13 @@ def train(cfg):
         cfg.neptune_run = setup_neptune(cfg)
 
     train_df, val_df, test_df = get_data(cfg)
-    
+
     train_dataset = get_dataset(train_df, cfg, mode='train')
     train_dataloader = get_dataloader(train_dataset, cfg, mode='train')
-    
+
     val_dataset = get_dataset(val_df, cfg, mode='val')
     val_dataloader = get_dataloader(val_dataset, cfg, mode='val')
-    
+
     if cfg.test:
         test_dataset = get_dataset(test_df, cfg, mode='test')
         test_dataloader = get_dataloader(test_dataset, cfg, mode='test')
@@ -182,7 +180,7 @@ def train(cfg):
     i = 0
     best_val_loss = np.inf
     optimizer.zero_grad()
-    total_grad_norm = None    
+    total_grad_norm = None
     total_grad_norm_after_clip = None
 
     for epoch in range(cfg.epochs):
@@ -190,13 +188,13 @@ def train(cfg):
         set_seed(cfg.seed + epoch + cfg.local_rank)
 
         cfg.curr_epoch = epoch
-        if cfg.local_rank == 0: 
+        if cfg.local_rank == 0:
             print("EPOCH:", epoch)
 
         if getattr(cfg, "reload_train_loader", False):
             train_dataset = get_dataset(train_df, cfg, mode='train')
             train_dataloader = get_dataloader(train_dataset, cfg, mode='train')
-        
+
 
         progress_bar = tqdm(range(len(train_dataloader)),disable=cfg.disable_tqdm)
         tr_it = iter(train_dataloader)
@@ -215,12 +213,12 @@ def train(cfg):
                 try:
                     data = next(tr_it)
                 except Exception as e:
+                    raise e
                     print(e)
                     print("DATA FETCH ERROR")
                     # continue
-
                 if (i == 1) & cfg.save_first_batch:
-                    save_first_batch(data, cfg)
+                    cfg.save_first_batch(data, cfg)
 
                 model.train()
                 torch.set_grad_enabled(True)
@@ -250,7 +248,7 @@ def train(cfg):
                         if (cfg.track_grad_norm) or (cfg.clip_grad > 0):
                             scaler.unscale_(optimizer)
                         if cfg.track_grad_norm:
-                            total_grad_norm = calc_grad_norm(model.parameters(), cfg.grad_norm_type)                              
+                            total_grad_norm = calc_grad_norm(model.parameters(), cfg.grad_norm_type)
                         if cfg.clip_grad > 0:
                             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.clip_grad)
                         if cfg.track_grad_norm:
@@ -280,7 +278,7 @@ def train(cfg):
                     loss_names = [key for key in output_dict if 'loss' in key]
                     for l in loss_names:
                         cfg.neptune_run[f"train/{l}"].log(value=output_dict[l].item(), step=cfg.curr_step)
-                        
+
                     cfg.neptune_run["lr"].log(
                         value=optimizer.param_groups[0]["lr"], step=cfg.curr_step
                     )
@@ -310,7 +308,7 @@ def train(cfg):
                     val_score = run_eval(model, val_dataloader, cfg, pre="val", curr_epoch=epoch)
             else:
                 val_score = 0
-            
+
         if cfg.train_val == True:
             if (epoch + 1) % cfg.eval_train_epochs == 0 or (epoch + 1) == cfg.epochs:
                 if cfg.local_rank == 0:
@@ -336,7 +334,7 @@ def train(cfg):
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="")
-    
+
     parser.add_argument("-C", "--config", help="config filename")
     parser.add_argument("-G", "--gpu_id", default="", help="GPU ID")
     parser_args, other_args = parser.parse_known_args(sys.argv)
@@ -370,7 +368,7 @@ if __name__ == "__main__":
 
     cfg.post_process_pipeline = importlib.import_module(cfg.post_process_pipeline).post_process_pipeline
     cfg.calc_metric = importlib.import_module(cfg.metric).calc_metric
-       
+
     result = train(cfg)
     print(result)
 

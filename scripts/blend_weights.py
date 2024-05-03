@@ -1,16 +1,24 @@
+import copy
+import glob
+import importlib
+import os
+import sys
+import warnings
+
+import ipdb
+import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from torch.nn import functional as F
 import torch.optim as optim
-from tqdm import tqdm
-import numpy as np
-import importlib, os, glob, copy, sys
-from utils import set_pandas_display
-import warnings
 from sklearn.model_selection import KFold
+from torch.nn import functional as F
+from tqdm import tqdm
+
+from utils import set_pandas_display
+
 warnings.filterwarnings("ignore")
-os.chdir('/Users/darraghhanley/Documents/kaggle-hms')
+#os.chdir('/Users/darraghhanley/Documents/kaggle-hms')
 sys.path.append("configs")
 sys.path.append("metrics")
 sys.path.append("models")
@@ -25,7 +33,7 @@ def load_preds(cfg_name, FOLD):
     df = pd.read_csv(cfg.val_df)
     test_ds = ds.CustomDataset(df.query(f'fold=={FOLD}'), cfg, cfg.val_aug, mode="valid")
     val_df = test_ds.df
-    
+
     assert len(glob.glob(f'weights/{cfg_name}/fold{FOLD}/val*')) == 2, glob.glob(f'weights/{cfg_name}/fold{FOLD}/val*')
     val_data_name = glob.glob(f'weights/{cfg_name}/fold{FOLD}/val*')[0]
     val_data = torch.load(val_data_name, map_location=torch.device('cpu'))
@@ -37,7 +45,7 @@ def load_preds(cfg_name, FOLD):
 
 
 weights_ls = "cfg_1 cfg_2a cfg_2b cfg_3 cfg_4 cfg_5a cfg_5b cfg_5c cfg_5d" .split()
- 
+
 
 # Load the validation file form one of the configs
 cfg_name = weights_ls[0]
@@ -48,13 +56,12 @@ val_df = pd.concat([d[0] for d in dfs])
 
 
 X = []
-for cfg_name in weights_1d + weights_mel_ls:
+for cfg_name in weights_ls:
     dfs = [load_preds(cfg_name, F) for F in range(4)]
     pred_df1 = pd.concat([d[1] for d in dfs])
     logits = pred_df1.filter(like='_logits').values
     logits = torch.from_numpy(logits)
     X.append(logits)
-
 
 X = torch.stack(X, -1)
 targets = val_df[cfg.targets].values
@@ -71,7 +78,7 @@ num_params = X.shape[-1]
 class Net(nn.Module):
     def __init__(self, n_models = 23):
         super(Net, self).__init__()
-        self.fc = nn.Linear(n_models, 1, bias = False) 
+        self.fc = nn.Linear(n_models, 1, bias = False)
         self.fc_c = torch.nn.Parameter(torch.zeros(6)[None,:])
         self.fc.load_state_dict({'weight': torch.ones(n_models)[None,:]/n_models})
     def forward(self, x):
@@ -99,19 +106,19 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(X)):
     # create a model and move it to CPU
     model = Net(X.shape[-1])
     model.to(device)
-    
+
     # loss function
     loss_fn = nn.KLDivLoss(reduction='batchmean')
-    
+
     # optimization (stochastic gradient descent)
     optimizer = optim.SGD(model.parameters(), lr=LR)
-    
+
     # prepare train and validation data loaders
     train_data = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(X.float()[train_idx], y[train_idx]), batch_size=2048//2, shuffle=True, drop_last = True)
     val_data = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(X.float()[val_idx], y[val_idx]), batch_size=2048//2, drop_last = True)
 
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10 * len(train_data), gamma=0.95)
-    
+
     for epoch in range(num_epochs):
         for inputs, labels in train_data:
             # move inputs and labels to device
@@ -130,7 +137,7 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(X)):
 
             # adjust learning rate
             scheduler.step()
-  
+
         if (epoch) % 100 == 0:
             # forward pass
             logits = model(X.float()[val_idx]).squeeze(-1)
@@ -148,10 +155,10 @@ print(np.corrcoef(weights).round(4))
 
 print(f'Correlation of class offsets')
 print(np.corrcoef(params_ls).round(4))
- 
- 
+
+
 # Save the weights
-weights_names = weights_1d + weights_mel_ls
+weights_names = weights_ls
 weights_dict = weights.mean(0).astype(np.float32)
 
 weights_dict = {n:i for n,i in zip(weights_names, weights_dict)}
